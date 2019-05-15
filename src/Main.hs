@@ -23,6 +23,7 @@ import Data.Version (showVersion)
 import System.Directory (createDirectoryIfMissing)
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
+import System.FilePath (takeDirectory)
 import System.FilePath.Glob (glob)
 import System.IO (hPutStrLn, stderr)
 
@@ -79,8 +80,8 @@ parseModuleGraphFromFiles inputFiles = do
 compile :: [(AST.Module, [ModuleName])] -> IO ()
 compile graph =
   runShake $ do
-    wants <- traverse (uncurry compileModule) graph
-    Shake.want (concat wants)
+    wants <- concat <$> traverse (uncurry compileModule) graph
+    Shake.want wants
 
 runShake :: Shake.Rules () -> IO ()
 runShake =
@@ -90,33 +91,30 @@ runShake =
 
 compileModule :: AST.Module -> [ModuleName] -> Shake.Rules [FilePath]
 compileModule m deps = do
-  let moduleOutputDir = outputDir </>
-                        Text.unpack (runModuleName (AST.getModuleName m))
-
-  let wants = [ moduleOutputDir </> corefnPath
-              , moduleOutputDir </> externsPath
+  let wants = [ outputFor (AST.getModuleName m) corefnPath
+              , outputFor (AST.getModuleName m) externsPath
               ]
 
-  wants &%> \[_c, _e] -> do
+  wants &%> \[coreFnPath, externsFilePath] -> do
     (needs, externsFiles) <- flip mapAndUnzipM deps $ \dep -> do
-      let externsFilePath = outputDir </>
-                            Text.unpack (runModuleName dep) </>
-                            externsPath
-
-      mbExternsFile <- liftIO (readExternsFile externsFilePath)
+      let need = outputFor dep externsPath
+      mbExternsFile <- liftIO (readExternsFile need)
       case mbExternsFile of
-        Nothing -> fail ("missing externs file: " <> externsFilePath)
-        Just externsFile -> pure (externsFilePath, externsFile)
+        Nothing -> fail ("missing externs file: " <> need)
+        Just externsFile -> pure (need, externsFile)
 
     Shake.need needs
 
     case runWriterT (compileCoreFn externsFiles m) of
-      Left _errors -> fail "TODO: compilation errors"
-      Right ((coreFn, externsFile), _warnings) -> liftIO $ do
-        createDirectoryIfMissing True moduleOutputDir
-        Aeson.encodeFile (moduleOutputDir </> externsPath) externsFile
-        Aeson.encodeFile (moduleOutputDir </> corefnPath)
-          (CoreFn.moduleToJSON PureScript.version coreFn)
+      Left _errors ->
+        fail "TODO: compilation errors"
+
+      Right ((coreFn, externsFile), _warnings) ->
+        liftIO $ do
+          createDirectoryIfMissing True (takeDirectory externsFilePath)
+          Aeson.encodeFile externsFilePath externsFile
+          Aeson.encodeFile coreFnPath
+            (CoreFn.moduleToJSON PureScript.version coreFn)
 
   pure wants
 
@@ -150,6 +148,10 @@ compileCoreFn externs m = do
   let optimized = CoreFn.optimizeCoreFn corefn
   let [renamed] = Renamer.renameInModules [optimized]
   pure (renamed, moduleToExternsFile mod' env')
+
+outputFor :: ModuleName -> FilePath -> FilePath
+outputFor moduleName base =
+  outputDir </> Text.unpack (runModuleName moduleName) </> base
 
 readExternsFile :: FilePath -> IO (Maybe ExternsFile)
 readExternsFile path = do
