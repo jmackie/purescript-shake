@@ -87,6 +87,7 @@ runShake :: Shake.Rules () -> IO ()
 runShake =
   Shake.shakeArgs Shake.shakeOptions
     { Shake.shakeLint = Just Shake.LintBasic
+    , Shake.shakeVerbosity = Shake.Diagnostic
     }
 
 compileModule :: AST.Module -> [ModuleName] -> Shake.Rules [FilePath]
