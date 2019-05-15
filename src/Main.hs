@@ -104,7 +104,9 @@ compileModule m deps = do
         Nothing -> fail ("missing externs file: " <> need)
         Just externsFile -> pure (need, externsFile)
 
-    Shake.need needs
+    -- Should we `need` the *.purs file path here?
+    let moduleName = AST.spanName (AST.getModuleSourceSpan m)
+    Shake.need (moduleName : needs)
 
     case runWriterT (compileCoreFn externsFiles m) of
       Left _errors ->
