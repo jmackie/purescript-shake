@@ -3,5 +3,5 @@ packages:
   - "."
 extra-deps:
   - github: purescript/purescript
-    commit: bd30494a07f5f34bd2a2bd2eda463a75c1688474
+    commit: ec5bdc77e42439368a595907488c0120a65f9c9b
   - network-3.0.1.1
