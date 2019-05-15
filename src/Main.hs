@@ -4,7 +4,7 @@
 
 {-# OPTIONS_GHC -Wall #-}
 
-module Main where
+module Main (main) where
 
 import Prelude
 
@@ -12,9 +12,9 @@ import qualified Data.Aeson as Aeson
 import qualified Data.List as List
 import qualified Data.Text as Text
 
-import Control.Monad (guard, mapAndUnzipM)
-import Control.Monad.IO.Class (liftIO)
+import Control.Monad (when, guard, mapAndUnzipM)
 import Control.Monad.Except (MonadError)
+import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Writer (MonadWriter, runWriterT)
 import Data.Foldable (foldl')
 import Data.Text (Text)
@@ -23,6 +23,7 @@ import Data.Version (showVersion)
 import System.Directory (createDirectoryIfMissing)
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
+import System.FilePath.Glob (glob)
 import System.IO (hPutStrLn, stderr)
 
 -- shake
@@ -49,7 +50,7 @@ import System.IO.UTF8 (readUTF8FileT)
 
 main :: IO ()
 main = do
-  moduleFiles <- readInput =<< getArgs
+  moduleFiles <- readInput =<< globWarningOnMisses =<< getArgs
   case parseModuleGraphFromFiles moduleFiles of
     Left errors -> do
       hPutStrLn stderr $ Errors.prettyPrintMultipleErrors Errors.defaultPPEOptions errors
@@ -159,6 +160,19 @@ readExternsFile path = do
       guard $ Text.unpack (efVersion externs) == showVersion PureScript.version
       pure (Just externs)
 
+globWarningOnMisses :: [FilePath] -> IO [FilePath]
+globWarningOnMisses = concatMapM globWithWarning
+  where
+  globWithWarning :: String -> IO [FilePath]
+  globWithWarning pattern' = do
+    paths <- glob pattern'
+    when (null paths) $
+      hPutStrLn stderr $
+        "purs compile: No files found using pattern: " <> pattern'
+    pure paths
+
+concatMapM :: (a -> IO [b]) -> [a] -> IO [b]
+concatMapM f = fmap concat . mapM f
 
 -- CONSTANTS
 
