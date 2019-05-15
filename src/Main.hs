@@ -12,10 +12,11 @@ import qualified Data.Aeson as Aeson
 import qualified Data.List as List
 import qualified Data.Text as Text
 
-import Control.Monad (guard)
+import Control.Monad (guard, mapAndUnzipM)
+import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Except (MonadError)
 import Control.Monad.Writer (MonadWriter, runWriterT)
-import Data.Foldable (foldl', traverse_)
+import Data.Foldable (foldl')
 import Data.Text (Text)
 import Data.Traversable (for)
 import Data.Version (showVersion)
@@ -25,7 +26,8 @@ import System.Exit (exitFailure)
 import System.IO (hPutStrLn, stderr)
 
 -- shake
-import Development.Shake
+import qualified Development.Shake as Shake
+import Development.Shake ((&%>))
 import Development.Shake.FilePath ((</>))
 
 -- purescript
@@ -75,22 +77,37 @@ parseModuleGraphFromFiles inputFiles = do
 
 compile :: [(AST.Module, [ModuleName])] -> IO ()
 compile graph =
-  shakeArgs shakeOptions $
-    traverse_ (uncurry compileModule) graph
+  runShake $ do
+    wants <- traverse (uncurry compileModule) graph
+    Shake.want (concat wants)
 
-compileModule :: AST.Module -> [ModuleName] -> Rules ()
+runShake :: Shake.Rules () -> IO ()
+runShake =
+  Shake.shakeArgs Shake.shakeOptions
+    { Shake.shakeLint = Just Shake.LintBasic
+    }
+
+compileModule :: AST.Module -> [ModuleName] -> Shake.Rules [FilePath]
 compileModule m deps = do
-  let moduleOutputDir = outputDir </> Text.unpack (runModuleName (AST.getModuleName m))
-  want [moduleOutputDir </> corefnPath, moduleOutputDir </> externsPath]
-  let src = AST.spanName (AST.getModuleSourceSpan m)
-  src %> \_ -> do
-    externsFiles <- for deps $ \dep -> do
-      let externsFilePath = outputDir </> Text.unpack (runModuleName dep) </> externsPath
-      need [externsFilePath]
+  let moduleOutputDir = outputDir </>
+                        Text.unpack (runModuleName (AST.getModuleName m))
+
+  let wants = [ moduleOutputDir </> corefnPath
+              , moduleOutputDir </> externsPath
+              ]
+
+  wants &%> \[_c, _e] -> do
+    (needs, externsFiles) <- flip mapAndUnzipM deps $ \dep -> do
+      let externsFilePath = outputDir </>
+                            Text.unpack (runModuleName dep) </>
+                            externsPath
+
       mbExternsFile <- liftIO (readExternsFile externsFilePath)
       case mbExternsFile of
         Nothing -> fail ("missing externs file: " <> externsFilePath)
-        Just externsFile -> pure externsFile
+        Just externsFile -> pure (externsFilePath, externsFile)
+
+    Shake.need needs
 
     case runWriterT (compileCoreFn externsFiles m) of
       Left _errors -> fail "TODO: compilation errors"
@@ -99,6 +116,8 @@ compileModule m deps = do
         Aeson.encodeFile (moduleOutputDir </> externsPath) externsFile
         Aeson.encodeFile (moduleOutputDir </> corefnPath)
           (CoreFn.moduleToJSON PureScript.version coreFn)
+
+  pure wants
 
 -- | Mostly copied from @Language.PureScript.Make.rebuildModule@.
 compileCoreFn
