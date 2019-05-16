@@ -22,3 +22,5 @@ cabal.project.local~
 .ghc.environment.*
 
 .shake
+.psc-package
+output

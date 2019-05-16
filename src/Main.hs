@@ -12,8 +12,8 @@ import qualified Data.Aeson as Aeson
 import qualified Data.List as List
 import qualified Data.Text as Text
 
-import Control.Monad (when, guard, mapAndUnzipM)
-import Control.Monad.Except (MonadError)
+import Control.Monad (when, guard)
+import Control.Monad.Except (MonadError, throwError)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Writer (MonadWriter, runWriterT)
 import Data.Foldable (foldl')
@@ -51,7 +51,11 @@ import System.IO.UTF8 (readUTF8FileT)
 
 main :: IO ()
 main = do
-  moduleFiles <- readInput =<< globWarningOnMisses =<< getArgs
+  moduleFiles <- readInput =<< concatMapM glob =<< getArgs
+  when (null moduleFiles) $ do
+    hPutStrLn stderr "purs-shake: No input files"
+    exitFailure
+
   case parseModuleGraphFromFiles moduleFiles of
     Left errors -> do
       hPutStrLn stderr $ Errors.prettyPrintMultipleErrors Errors.defaultPPEOptions errors
@@ -71,46 +75,46 @@ parseModuleGraphFromFiles inputFiles = do
   pathsAndModules <- CST.parseModulesFromFiles id inputFiles
   let modules = fmap (CST.resPartial . snd) pathsAndModules
   (sorted, graph) <- sortModules moduleSignature modules
-  for sorted $ \m ->
-    maybe (error "wat") pure $ do
-      let moduleName = AST.getModuleName m
+  for sorted $ \m -> do
+    let moduleName = AST.getModuleName m
+    let err =  Errors.errorMessage (AST.ModuleNotFound moduleName)
+    maybe (throwError err) pure $ do
       deps <- List.lookup moduleName graph
       pure (m, deps)
 
 compile :: [(AST.Module, [ModuleName])] -> IO ()
 compile graph =
   runShake $ do
-    wants <- concat <$> traverse (uncurry compileModule) graph
+    wants <- concatMapM (uncurry compileModule) graph
     Shake.want wants
 
 runShake :: Shake.Rules () -> IO ()
 runShake =
-  Shake.shakeArgs Shake.shakeOptions
+  Shake.shake Shake.shakeOptions
     { Shake.shakeLint = Just Shake.LintBasic
-    , Shake.shakeVerbosity = Shake.Diagnostic
+    , Shake.shakeVerbosity = Shake.Silent
+    , Shake.shakeChange = Shake.ChangeModtimeAndDigest
     }
 
 compileModule :: AST.Module -> [ModuleName] -> Shake.Rules [FilePath]
-compileModule m deps = do
-  let wants = [ outputFor (AST.getModuleName m) corefnPath
-              , outputFor (AST.getModuleName m) externsPath
+compileModule m@(AST.Module sourceSpan _ moduleName _ _) deps = do
+  let wants = [ outputFor moduleName corefnPath
+              , outputFor moduleName externsPath
               ]
-
   wants &%> \[coreFnPath, externsFilePath] -> do
-    (needs, externsFiles) <- flip mapAndUnzipM deps $ \dep -> do
-      let need = outputFor dep externsPath
-      mbExternsFile <- liftIO (readExternsFile need)
+    Shake.need [AST.spanName sourceSpan]
+    externsFiles <- for deps $ \dep -> do
+      let depExterns = outputFor dep externsPath
+      Shake.need [depExterns]
+      mbExternsFile <- liftIO (readExternsFile depExterns)
       case mbExternsFile of
-        Nothing -> fail ("missing externs file: " <> need)
-        Just externsFile -> pure (need, externsFile)
+        Nothing -> fail ("missing externs file: " <> depExterns)
+        Just externsFile -> pure externsFile
 
-    -- Should we `need` the *.purs file path here?
-    let moduleName = AST.spanName (AST.getModuleSourceSpan m)
-    Shake.need (moduleName : needs)
-
+    -- FIXME: I think we need externs files for transitive dependencies as well...
     case runWriterT (compileCoreFn externsFiles m) of
-      Left _errors ->
-        fail "TODO: compilation errors"
+      Left errors ->
+        fail $ Errors.prettyPrintMultipleErrors Errors.defaultPPEOptions errors
 
       Right ((coreFn, externsFile), _warnings) ->
         liftIO $ do
@@ -118,6 +122,8 @@ compileModule m deps = do
           Aeson.encodeFile externsFilePath externsFile
           Aeson.encodeFile coreFnPath
             (CoreFn.moduleToJSON PureScript.version coreFn)
+
+          putStrLn ("Compiled " <> Text.unpack (runModuleName moduleName))
 
   pure wants
 
@@ -165,19 +171,8 @@ readExternsFile path = do
       guard $ Text.unpack (efVersion externs) == showVersion PureScript.version
       pure (Just externs)
 
-globWarningOnMisses :: [FilePath] -> IO [FilePath]
-globWarningOnMisses = concatMapM globWithWarning
-  where
-  globWithWarning :: String -> IO [FilePath]
-  globWithWarning pattern' = do
-    paths <- glob pattern'
-    when (null paths) $
-      hPutStrLn stderr $
-        "purs compile: No files found using pattern: " <> pattern'
-    pure paths
-
-concatMapM :: (a -> IO [b]) -> [a] -> IO [b]
-concatMapM f = fmap concat . mapM f
+concatMapM :: Applicative m => (a -> m [b]) -> [a] -> m [b]
+concatMapM f = fmap concat . traverse f
 
 -- CONSTANTS
 
