@@ -1,6 +1,7 @@
-{-# LANGUAGE TupleSections    #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE LambdaCase       #-}
+{-# LANGUAGE TupleSections       #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 {-# OPTIONS_GHC -Wall #-}
 
@@ -58,7 +59,8 @@ main = do
 
   case parseModuleGraphFromFiles moduleFiles of
     Left errors -> do
-      hPutStrLn stderr $ Errors.prettyPrintMultipleErrors Errors.defaultPPEOptions errors
+      hPutStrLn stderr $
+        Errors.prettyPrintMultipleErrors Errors.defaultPPEOptions errors
       exitFailure
 
     Right graph ->
@@ -75,12 +77,28 @@ parseModuleGraphFromFiles inputFiles = do
   pathsAndModules <- CST.parseModulesFromFiles id inputFiles
   let modules = fmap (CST.resPartial . snd) pathsAndModules
   (sorted, graph) <- sortModules moduleSignature modules
-  for sorted $ \m -> do
-    let moduleName = AST.getModuleName m
-    let err =  Errors.errorMessage (AST.ModuleNotFound moduleName)
-    maybe (throwError err) pure $ do
-      deps <- List.lookup moduleName graph
-      pure (m, deps)
+  for sorted $ \m ->
+    (m,) <$> allModuleDependencies graph (AST.getModuleName m)
+
+  --for sorted $ \m -> do
+  --  let moduleName = AST.getModuleName m
+  --  let err =  Errors.errorMessage (AST.ModuleNotFound moduleName)
+  --  maybe (throwError err) pure $ do
+  --    deps <- List.lookup moduleName graph
+  --    pure (m, deps)
+
+-- | Collect all dependencies (including transitive) from a 'ModuleGraph'.
+allModuleDependencies
+  :: forall m
+   . MonadError Errors.MultipleErrors m
+  => [(ModuleName, [ModuleName])]
+  -> ModuleName
+  -> m [ModuleName]
+allModuleDependencies graph moduleName =
+  case List.lookup moduleName graph of
+    Nothing   -> throwError (Errors.errorMessage (AST.ModuleNotFound moduleName))
+    Just []   -> pure []
+    Just deps -> mappend deps <$> concatMapM (allModuleDependencies graph) deps
 
 compile :: [(AST.Module, [ModuleName])] -> IO ()
 compile graph =
@@ -102,16 +120,19 @@ compileModule m@(AST.Module sourceSpan _ moduleName _ _) deps = do
               , outputFor moduleName externsPath
               ]
   wants &%> \[coreFnPath, externsFilePath] -> do
-    Shake.need [AST.spanName sourceSpan]
-    externsFiles <- for deps $ \dep -> do
-      let depExterns = outputFor dep externsPath
-      Shake.need [depExterns]
-      mbExternsFile <- liftIO (readExternsFile depExterns)
+    let depExternsFiles = fmap (`outputFor` externsPath) deps
+    Shake.need (AST.spanName sourceSpan : depExternsFiles)
+
+    externsFiles <- for depExternsFiles $ \depExternsFile -> do
+      mbExternsFile <- liftIO (readExternsFile depExternsFile)
       case mbExternsFile of
-        Nothing -> fail ("missing externs file: " <> depExterns)
+        Nothing -> fail ("missing externs file: " <> depExternsFile)
         Just externsFile -> pure externsFile
 
-    -- FIXME: I think we need externs files for transitive dependencies as well...
+
+    -- FIXME: What's going on here?
+    liftIO . print $ foldl' (flip applyExternsFileToEnvironment) initEnvironment externsFiles
+
     case runWriterT (compileCoreFn externsFiles m) of
       Left errors ->
         fail $ Errors.prettyPrintMultipleErrors Errors.defaultPPEOptions errors
