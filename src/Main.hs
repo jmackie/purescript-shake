@@ -43,7 +43,7 @@ import qualified Language.PureScript.Errors as Errors
 import qualified Language.PureScript.Renamer as Renamer
 import qualified Language.PureScript.Sugar as Sugar
 import qualified Language.PureScript.TypeChecker as TypeChecker
-import Language.PureScript.Environment (initEnvironment)
+import qualified Language.PureScript.Environment as Environment
 import Language.PureScript.Externs (ExternsFile(..), applyExternsFileToEnvironment, moduleToExternsFile)
 import Language.PureScript.ModuleDependencies (sortModules, moduleSignature)
 import Language.PureScript.Names (ModuleName, runModuleName)
@@ -129,9 +129,10 @@ compileModule m@(AST.Module sourceSpan _ moduleName _ _) deps = do
         Nothing -> fail ("missing externs file: " <> depExternsFile)
         Just externsFile -> pure externsFile
 
-
-    -- FIXME: What's going on here?
-    liftIO . print $ foldl' (flip applyExternsFileToEnvironment) initEnvironment externsFiles
+    -- FIXME
+    -- `efExports = []` (i.e. no explicit exports) causes compilation to fail
+    -- with UnknownImport...what's going on?
+    liftIO $ print externsFiles
 
     case runWriterT (compileCoreFn externsFiles m) of
       Left errors ->
@@ -158,7 +159,9 @@ compileCoreFn
   -> m (CoreFn.Module CoreFn.Ann, ExternsFile)
 compileCoreFn externs m = do
   let moduleName = AST.getModuleName m
-  let env = foldl' (flip applyExternsFileToEnvironment) initEnvironment externs
+  let env = foldl' (flip applyExternsFileToEnvironment)
+              Environment.initEnvironment
+              externs
   let withPrim = AST.importPrim m
   ((AST.Module ss coms _ elaborated exps, env'), nextVar) <-
     runSupplyT 0 $
